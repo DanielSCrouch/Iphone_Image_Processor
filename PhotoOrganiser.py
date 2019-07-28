@@ -7,13 +7,17 @@ import time
 import shutil
 import reverse_geocode
 import geocoder
-from subprocess import Popen
-from subprocess import PIPE
+import subprocess
+import pathlib
+import re
 
 # Third party Python libraries.
 # Custom Python libraries.
 
-# ICloud causes latency issues - use on local only
+# ICloud seems to cause latency issues - use on local only
+
+global FILETYPES
+FILETYPES = ('.jpg', '.JPG', '.MOV', '.HEIC')
 
 class PhotoOrganiser:
     """Photo Organiser class object"""
@@ -22,123 +26,119 @@ class PhotoOrganiser:
         """Iniitialize Organiser class object."""
         self.srcDir = srcDir
         self.destDir = destDir
+
+        # If destination directory not specified then create
         if not destDir:
             basename = f"{os.path.basename(srcDir)} sorted {get_timestamp()}"
             os.mkdir(basename)
             self.destDir = os.path.join(os.getcwd(), basename)
-        self.srcPaths = []
 
     def go(self):
         """Copy, sort and rename image files to destination directory"""
-        self.updatePaths()
-        self.copyFiles()
-        self.renameFiles()
+        print('running')
+        if self.checkFileTypes():
+            self.copyFiles()
+            self.metaNaming()
 
-    def updatePaths(self, print_dirTree=False):
-        """Update srcPaths list of absolute file paths from dir tree"""
-        for root, dirs, files in os.walk(self.srcDir):
-            for name in files:
-                if name != '.DS_Store':
-                    self.srcPaths.append(os.path.join(root, name))
-            if print_dirTree:
-                for name in dirs:
-                    print(os.path.join(root, name))
-        print(f"[*] {(len(self.srcPaths))} files identified")
+    def checkFileTypes(self):
+        absPaths = self.getPaths()
+        for absPath in absPaths:
+            baseName, ext = os.path.splitext(os.path.basename(absPath))
+            if ext not in FILETYPES:
+                response = input(f"{ext} found in source directory, continue? [Y,n]")
+                if response == 'n' or 'N':
+                    return False
+                else:
+                    return True
+        return True
 
     def copyFiles(self):
-        """Copy files from srcPaths list to destDir. Maintain meta data"""
+        """Copy files from srcPaths to destDir. Maintain meta data"""
         count = 0
-        for absPath in self.srcPaths:
+        for absPath in self.getPaths():
             shutil.copy2(absPath, self.destDir)
             count += 1
         print(f"[*] {count} files copied to {self.destDir}")
 
-    def renameFiles(self):
-        count = 0
-        for root, dirs, files in os.walk(self.destDir):
-            for file in files:
-                absPath = os.path.join(root, file)
-                newName = self.getMetaName(absPath)
-                os.rename(absPath, newName)
-                count += 1
-        print(f"[*] {count} files have been renamed")
+    def getPaths(self, print_dirTree=False):
+        """Return srcPaths list of absolute file paths from dir tree"""
+        srcPaths = []
+        for root, dirs, files in os.walk(self.srcDir):
+            for name in files:
+                if name != '.DS_Store':
+                    srcPaths.append(os.path.join(root, name))
+            if print_dirTree:
+                for name in dirs:
+                    print(os.path.join(root, name))
+        print(f"[*] {(len(srcPaths))} files identified")
+        return srcPaths
 
-    def getMetaName(self, imagePath):
+    def metaNaming(self):
         """Use terminal commands to extract location from EXIF data
-            and return name based on meta data"""
+            and update destDir file names accordingly"""
+        count = 0
+        pic_file = pathlib.Path(self.destDir).glob('*.*')
+        for file in pic_file:
+            baseName, ext = os.path.splitext(file)
+            if ext in FILETYPES:
+                print(file)
+                command = ['mdls',
+                           '-name', 'kMDItemLatitude',
+                           '-name', 'kMDItemLongitude',
+                           str(file)]
+                output = subprocess.check_output(command, encoding='utf-8')
 
-        print('.......========.......')
-        try:
-            cmdLat = "mdls \"" + imagePath + "\" | grep Latitude | awk '{print $3}'"
-            subprocess = Popen(cmdLat, shell=True, stdout=PIPE)
-            Popen.wait(subprocess)
-            lat = subprocess.communicate()[0]
-            latFloat = float(lat.decode())
-        except Exception as e:
-            print("Failed finding lattitude, exception:", e)
-            print("lat value: ", lat)
+                print(output)
+                # Parse the output
+                lines = output.splitlines()
+                values = [line.split()[-1] for line in lines]
 
-        try:
-            cmdLon = "mdls \"" + imagePath + "\" | grep Longitude | awk '{print $3}'"
-            lon = (Popen(cmdLon, shell=True, stdout=PIPE).communicate()[0])
-            lonFloat = float(lon.decode())
-        except Exception as e:
-            print("Failed finding longitude, exception:", e)
-            print("lon value: ", lat)
+                # Convert to float, check value coordinates
+                geoLocate = False
+                try:
+                    lat, lon = [float(value) for value in values]
+                    geoLocate = True
+                except:
+                    lat, lon = values
 
-        coordinates = (latFloat, lonFloat),
-        result = reverse_geocode.search(coordinates)
-        location = result[0]['city'] + result[0]['country_code']
-        cmdDate = "mdls " + imagePath + "| grep -w kMDItemFSCreationDate | awk '{print $3}'"
-        date = (Popen(cmdDate, shell=True, stdout=PIPE).communicate()[0]).decode()
-        dateFormat = date.replace('-','-').strip()
-        cmdTime = "mdls \"" + imagePath + "\" | grep -w kMDItemFSCreationDate | awk '{print $4}'"
-        time = (Popen(cmdTime, shell=True, stdout=PIPE).communicate()[0]).decode()
-        timeFormat = time.replace(':','-').strip()
-        print(os.path.basename(imagePath), 'has been successful')
-        print(f"{dateFormat}_{timeFormat}_{location}")
-        return(f"{dateFormat}_{timeFormat}_{location}")
+                # Get geolocation
+                location = ''
+                if geoLocate:
+                    result = reverse_geocode.search([(lat, lon)])
+                    location = '_' + result[0]['city'] + result[0]['country_code']
 
-# lat=$(mdls IMG_0149.JPG | grep Latitude | awk '{print $3}')
-# lat=$(mdls "/Users/DC/Documents/Code/Photo Organiser/srcDirTest sorted 20190727_140755/IMG_0164.JPG" | grep Latitude | awk '{print $3}')
+                # Get creation date and time
+                command = ['mdls',
+                           '-name', 'kMDItemFSCreationDate',
+                           str(file)]
+                output = subprocess.check_output(command, encoding='utf-8')
 
-    # def getMetaName(self, imagePath):
-    #     """Use terminal commands to extract location from EXIF data
-    #         and return name based on meta data"""
-    #     cmdLat = "mdls \"" + imagePath + "\" | grep Latitude | awk '{print $3}'"
-    #     cmdLon = "mdls \"" + imagePath + "\" | grep Longitude | awk '{print $3}'"
-    #     print('.......========.......')
-    #     lat = (Popen(cmdLat, shell=True, stdout=PIPE).communicate()[0])
-    #     # lat=$(mdls IMG_0149.JPG | grep Latitude | awk '{print $3}')
-    #     # lat=$(mdls "/Users/DC/Documents/Code/Photo Organiser/srcDirTest sorted 20190727_140755/IMG_0164.JPG" | grep Latitude | awk '{print $3}')
-    #     lon = (Popen(cmdLon, shell=True, stdout=PIPE).communicate()[0])
-    #     try:
-    #         latFloat = float(lat.decode())
-    #     except Exception as e:
-    #         print('problem lat: ',lat.decode(), 'with image: ', imagePath)
-    #         print('exception: ', e)
-    #     try:
-    #         lonFloat = float(lon.decode())
-    #     except:
-    #         print('problem lon: ',lat.decode(), 'with image: ', imagePath)
-    #     coordinates = (latFloat, lonFloat),
-    #     result = reverse_geocode.search(coordinates)
-    #     location = result[0]['city'] + result[0]['country_code']
-    #     cmdDate = "mdls " + imagePath + "| grep -w kMDItemFSCreationDate | awk '{print $3}'"
-    #     date = (Popen(cmdDate, shell=True, stdout=PIPE).communicate()[0]).decode()
-    #     dateFormat = date.replace('-','-').strip()
-    #     cmdTime = "mdls \"" + imagePath + "\" | grep -w kMDItemFSCreationDate | awk '{print $4}'"
-    #     time = (Popen(cmdTime, shell=True, stdout=PIPE).communicate()[0]).decode()
-    #     timeFormat = time.replace(':','-').strip()
-    #     return(f"{dateFormat}_{timeFormat}_{location}")
+                # Parse the output
+                date = re.search('\d{4}-\d{2}-\d{2}', output).group(0)
+                time = re.search('\d{2}:\d{2}:\d{2}', output).group(0).replace(':', '-')
 
+                # Rename file
+                newBaseName = f"{date}_{time}{location}"
+                absPath = os.path.join(self.destDir, file)
+                self.renameFile(absPath, newBaseName)
+
+                count += 1
+            else:
+                print('file type not included: ', file)
+        print(f"[*] {count} files renamed")
+
+    def renameFile(self, absPath, newBaseName):
+        """Rename file in path with new base name, keep extension"""
+        dir = os.path.dirname(absPath)
+        baseName, ext = os.path.splitext(os.path.basename(absPath))
+        newName = os.path.join(dir, newBaseName + ext)
+        os.rename(absPath, newName)
 
 def get_timestamp():
     """Retrieve a pre-formated datetimestamp."""
     now = time.localtime()
     timestamp = time.strftime("%Y%m%d_%H%M%S", now)
     return timestamp
-
 
 if __name__ == "__main__":
 
