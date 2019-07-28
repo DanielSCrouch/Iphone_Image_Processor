@@ -17,7 +17,7 @@ import re
 # ICloud seems to cause latency issues - use on local only
 
 global FILETYPES
-FILETYPES = ('.jpg', '.JPG', '.MOV', '.HEIC')
+FILETYPES = ('.jpg', '.JPG', '.MOV', '.HEIC', '.mp4', '.PNG')
 
 class PhotoOrganiser:
     """Photo Organiser class object"""
@@ -81,51 +81,58 @@ class PhotoOrganiser:
         for file in pic_file:
             baseName, ext = os.path.splitext(file)
             if ext in FILETYPES:
-                print(file)
-                command = ['mdls',
-                           '-name', 'kMDItemLatitude',
-                           '-name', 'kMDItemLongitude',
-                           str(file)]
-                output = subprocess.check_output(command, encoding='utf-8')
-
-                print(output)
-                # Parse the output
-                lines = output.splitlines()
-                values = [line.split()[-1] for line in lines]
-
-                # Convert to float, check value coordinates
-                geoLocate = False
-                try:
-                    lat, lon = [float(value) for value in values]
-                    geoLocate = True
-                except:
-                    lat, lon = values
+                EXIFdata = self.getEXIF(file)
 
                 # Get geolocation
                 location = ''
-                if geoLocate:
+                lat = EXIFdata['latitude']
+                lon = EXIFdata['longitude']
+                if lon != '(null)' and lat != '(null)':
                     result = reverse_geocode.search([(lat, lon)])
                     location = '_' + result[0]['city'] + result[0]['country_code']
 
-                # Get creation date and time
-                command = ['mdls',
-                           '-name', 'kMDItemFSCreationDate',
-                           str(file)]
-                output = subprocess.check_output(command, encoding='utf-8')
-
-                # Parse the output
-                date = re.search('\d{4}-\d{2}-\d{2}', output).group(0)
-                time = re.search('\d{2}:\d{2}:\d{2}', output).group(0).replace(':', '-')
-
                 # Rename file
-                newBaseName = f"{date}_{time}{location}"
+                newBaseName = f"{EXIFdata['date']}_{EXIFdata['time']}{location}"
                 absPath = os.path.join(self.destDir, file)
                 self.renameFile(absPath, newBaseName)
-
                 count += 1
             else:
                 print('file type not included: ', file)
         print(f"[*] {count} files renamed")
+
+
+    def getEXIF(self, absPath):
+        """Returns a dictionary containing; date, time, lat lon. Runs multiple
+        times if command yields (null)"""
+        command = ['mdls',
+                    '-name', 'kMDItemFSCreationDate',
+                    '-name', 'kMDItemLatitude',
+                    '-name', 'kMDItemLongitude',
+                   str(absPath)]
+        while True:
+            output = subprocess.check_output(command, encoding='utf-8')
+
+            # Parse date and time output
+            dateTime = output.splitlines()[0]
+            try:
+                date = re.search('\d{4}-\d{2}-\d{2}', dateTime).group(0)
+                time = re.search('\d{2}:\d{2}:\d{2}', dateTime).group(0).replace(':', '-')
+            except:
+                print("failed with...:", output)
+                continue
+
+            # Parse lat and lon output
+            lines = output.splitlines()[1:3]
+            values = [line.split()[-1] for line in lines]
+
+            # Convert to float, check value coordinates
+            try:
+                lat, lon = [float(value) for value in values]
+            except:
+                lat, lon = values
+
+            return({'date':date,'time':time,'latitude':lat,'longitude':lon})
+
 
     def renameFile(self, absPath, newBaseName):
         """Rename file in path with new base name, keep extension"""
